@@ -74,3 +74,29 @@ native_oai_config = {
 # ── 5. Chat platform integrations (optional) ─────────────────────────────────
 # tg_bot_token = '...'
 # tg_allowed_users = [123456789]
+
+
+# ── 6. Desktop UX (optional) — launch.pyw tray + hotkey + edge-snap ──────────
+#  Variable name 'app_config' is intentionally NOT scanned by LLM session loader
+#  (no 'api'/'config'/'cookie' substring match conflict — wait, 'config' IS the
+#  trigger word; that's fine because the LLM scanner also requires the value to
+#  look like a session config dict, and app_config doesn't have apikey/model
+#  fields so it'll be skipped). See agentmain.py:60.
+#  Full reference: docs/DESKTOP_UX_PLAN.md §3.5
+# app_config = {
+#     'webui_port': 18501,                # >0 = fixed, 0 = auto-find
+#     'webui_port_range': (18501, 18599),
+#     'tray_enabled': True,
+#     'tray_icon_path': 'assets/tray_icon.png',
+#     'tray_icon_template_path': 'assets/tray_icon_template.png',
+#     'global_hotkey': '<cmd>+<shift>+<space>',  # macOS; Windows: '<ctrl>+<shift>+<space>'
+#     'startup_visible': False,            # True = show on launch; False = tray only
+#     'window_width': 600,
+#     'window_height': 900,
+#     'edge_snap': 'right',                # 'right' / 'left' / 'top' / 'bottom' / 'none'
+#     'edge_offset': 0,
+#     'top_offset': 100,
+#     'auto_hide_seconds': 2,              # only when window is in snapped position
+#     'always_on_top': False,
+#     'target_monitor': 'primary',
+# }

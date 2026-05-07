@@ -1,0 +1,7 @@
+# MCP Servers Configuration
+mcp_servers:
+  aimemkb:
+    type: streamable-http
+    url: "http://9.134.45.136:11920/mcp"
+    headers:
+      Authorization: "Bearer amk_b5190890b87b98de78e86279dd8f192c02a7c6e1b26441fa809492a864fd67d2"

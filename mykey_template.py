@@ -423,3 +423,25 @@ native_oai_config = {
 #     'secret_key': 'sk-lf-...',
 #     'host': 'https://cloud.langfuse.com',   # 或自托管地址
 # }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. Desktop UX 配置（可选）—— launch.pyw 系统托盘 + 全局快捷键 + 边缘吸附
+# 详见 docs/DESKTOP_UX_PLAN.md §3.5
+# ══════════════════════════════════════════════════════════════════════════════
+# app_config = {
+#     'webui_port': 18501,                # >0 固定端口；0 自动找
+#     'webui_port_range': (18501, 18599),
+#     'tray_enabled': True,
+#     'tray_icon_path': 'assets/tray_icon.png',
+#     'tray_icon_template_path': 'assets/tray_icon_template.png',
+#     'global_hotkey': '<cmd>+<shift>+<space>',  # macOS；Windows: '<ctrl>+<shift>+<space>'
+#     'startup_visible': False,            # True 启动即显示；False 仅托盘
+#     'window_width': 600,
+#     'window_height': 900,
+#     'edge_snap': 'right',
+#     'edge_offset': 0,
+#     'top_offset': 100,
+#     'auto_hide_seconds': 2,              # 仅在窗口处于吸附状态时触发
+#     'always_on_top': False,
+# }

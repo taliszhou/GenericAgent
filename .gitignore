@@ -88,6 +88,21 @@ memory/L4_raw_sessions/*
 # Memory management
 !memory/memory_cleanup_sop.md
 
+# aimemkb (AI Memory KB) SOPs
+!memory/aimemkb_sop.md
+!memory/aimemkb_usage_sop.md
+
+# MCP native tools SOP
+!memory/mcp_native_sop.md
+
+# Sophub platform integration
+!memory/sophub.md
+# NOTE: memory/sophub_<hash>.md are downloaded HTML cache, keep ignored
+
+# Research/contribution SOPs (Chinese)
+!memory/开源项目调研报告 SOP.md
+!memory/知识库入库 SOP.md
+
 # Visual Studio
 .vs/
 restore_commit.txt
