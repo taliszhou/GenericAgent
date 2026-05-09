@@ -6,7 +6,6 @@ Run from the project root:
 
 Useful options:
 
-    python frontends/tuiapp.py --demo   # no LLM/key usage; fake streaming agent for smoke tests
     python frontends/tuiapp.py --help
 
 MVP design notes:
@@ -56,6 +55,7 @@ class ChatMessage:
     content: str
     task_id: Optional[int] = None
     done: bool = True
+    _rendered_panel: Any = field(default=None, repr=False)
 
 
 @dataclass
@@ -146,63 +146,9 @@ def parse_local_command(raw: str) -> tuple[str, list[str]] | None:
     name, *rest = text.split(maxsplit=1)
     cmd = name[1:].lower()
     args = rest[0].split() if rest else []
-    if cmd in {"help", "status", "new", "switch", "sessions", "stop", "llm", "quit", "exit"}:
+    if cmd in {"help", "status", "new", "switch", "sessions", "stop", "llm", "branch", "rewind", "clear", "close", "quit", "exit"}:
         return cmd, args
     return None
-
-
-class DemoAgent:
-    """Small fake agent used by --demo and tests; mimics put_task/run/display_queue."""
-
-    def __init__(self) -> None:
-        self.task_queue: queue.Queue = queue.Queue()
-        self.is_running = False
-        self.stop_sig = False
-        self.inc_out = True
-        self.verbose = False
-        self._llm_no = 0
-
-    def run(self) -> None:
-        while True:
-            task = self.task_queue.get()
-            raw = task["query"]
-            dq = task["output"]
-            self.is_running = True
-            self.stop_sig = False
-            chunks = [
-                "LLM Running (Turn 1) ...\n<summary>demo planning</summary>\n",
-                f"Echo: {raw}\n",
-                "LLM Running (Turn 2) ...\nFinal demo answer.\n",
-            ]
-            full = ""
-            for chunk in chunks:
-                if self.stop_sig:
-                    break
-                time.sleep(0.08)
-                full += chunk
-                dq.put({"next": chunk, "source": "demo"})
-            if self.stop_sig:
-                full += "\n[Interrupted]"
-            dq.put({"done": full, "source": "demo"})
-            self.is_running = False
-            self.task_queue.task_done()
-
-    def put_task(self, query: str, source: str = "user", images: Optional[list[Any]] = None) -> queue.Queue:
-        dq: queue.Queue = queue.Queue()
-        self.task_queue.put({"query": query, "source": source, "images": images or [], "output": dq})
-        return dq
-
-    def abort(self) -> None:
-        self.stop_sig = True
-
-    def list_llms(self) -> list[tuple[int, str, bool]]:
-        return [(0, "DemoAgent/demo", True)]
-
-    def next_llm(self, n: int = -1) -> None:
-        self._llm_no = 0
-
-    def get_llm_name(self, b: Any = None, model: bool = False) -> str:
-        return "demo"
 
 
 def default_agent_factory() -> Any:
@@ -236,13 +182,12 @@ class GenericAgentTUI(App[None]):
         Binding("ctrl+right", "next_session", "Next→", show=True, priority=True),
     ]
 
-    def __init__(self, agent_factory: Optional[AgentFactory] = None, *, demo: bool = False) -> None:
+    def __init__(self, agent_factory: Optional[AgentFactory] = None) -> None:
         super().__init__()
-        self.agent_factory: AgentFactory = agent_factory or (DemoAgent if demo else default_agent_factory)
+        self.agent_factory: AgentFactory = agent_factory or default_agent_factory
         self.sessions: dict[int, AgentSession] = {}
         self.current_id: Optional[int] = None
         self._ids = count(1)
-        self.demo = demo
         self.fold_mode: bool = True
         self._last_stream_refresh: float = 0.0
         self._stream_throttle_ms: float = 0.15  # seconds between streaming UI refreshes
@@ -254,13 +199,17 @@ class GenericAgentTUI(App[None]):
             with Vertical(id="main"):
                 yield Static("", id="status")
                 yield RichLog(id="log", wrap=True, highlight=True, markup=True)
-        yield Input(placeholder="Message, or /help  /new name  /switch 1  /sessions  /stop  /llm", id="prompt")
+        yield Input(placeholder="Message, or /help  /new  /branch  /rewind  /switch  /clear  /close  /stop  /llm  /resume", id="prompt")
         yield Footer()
 
     def on_mount(self) -> None:
         self.add_session("main")
         self._system("Welcome to GenericAgent TUI. Type /help for commands.")
         self.query_one("#prompt", Input).focus()
+
+    def on_resize(self, event) -> None:
+        narrow = self.size.width < 70
+        self.query_one("#sidebar").styles.display = "none" if narrow else "block"
 
     @property
     def current(self) -> AgentSession:
@@ -339,6 +288,10 @@ class GenericAgentTUI(App[None]):
             "sessions": self._cmd_sessions,
             "stop": self._cmd_stop,
             "llm": self._cmd_llm,
+            "branch": self._cmd_branch,
+            "rewind": self._cmd_rewind,
+            "clear": self._cmd_clear,
+            "close": self._cmd_close,
             "quit": lambda _args: self.exit(),
             "exit": lambda _args: self.exit(),
         }
@@ -411,17 +364,24 @@ class GenericAgentTUI(App[None]):
                 break
         else:
             session.messages.append(ChatMessage("assistant", text, task_id=task_id, done=done))
-        self._refresh_all()
+        if agent_id == self.current_id:
+            self._refresh_all()
+        else:
+            self._refresh_sidebar()
 
     def _cmd_help(self, args: list[str]) -> None:
         self._system(
             "Commands:\n"
             "/help - show this help\n"
             "/new [name] - create and switch to a new agent session\n"
+            "/branch [name] - fork current session (copies LLM history + display)\n"
+            "/rewind - list rewindable turns; /rewind <n> to truncate history\n"
             "/switch <id|name> - switch active session\n"
             "/sessions - list sessions\n"
             "/status - show current/all status\n"
             "/stop - abort current session task\n"
+            "/clear - clear chat display (keeps LLM history)\n"
+            "/close - close current session (cannot close last)\n"
             "/llm - list models for current session\n"
             "/llm <n> - switch model for current session\n"
             "/quit - exit TUI\n\n"
@@ -432,6 +392,95 @@ class GenericAgentTUI(App[None]):
         name = " ".join(args).strip() or None
         session = self.add_session(name)
         self._system(f"Created session #{session.agent_id} {session.name!r}. Shared temp/memory are not isolated.")
+
+    def _cmd_branch(self, args: list[str]) -> None:
+        import copy
+        old_session = self.current
+        name = " ".join(args).strip() or f"{old_session.name}-branch"
+        new_session = self.add_session(name)
+        # Copy LLM backend history
+        try:
+            new_session.agent.llmclient.backend.history = copy.deepcopy(
+                old_session.agent.llmclient.backend.history
+            )
+        except Exception as e:
+            self._system(f"Branch warning: failed to copy history: {e}")
+            return
+        # Copy TUI display messages
+        new_session.messages = copy.deepcopy(old_session.messages)
+        new_session.task_seq = old_session.task_seq
+        n = len(new_session.agent.llmclient.backend.history)
+        self._system(f"Branched from #{old_session.agent_id} → #{new_session.agent_id} ({n} messages inherited).")
+
+    def _cmd_rewind(self, args: list[str]) -> None:
+        session = self.current
+        if session.status == "running":
+            self._system("Cannot rewind while running. /stop first.")
+            return
+        history = session.agent.llmclient.backend.history
+        # Find real user turn boundaries — skip tool_result messages
+        turns = []  # list of (index_in_history, preview_text)
+        for i, msg in enumerate(history):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            # Pure string content is always a real user message
+            if isinstance(content, str):
+                turns.append((i, content[:60]))
+                continue
+            if isinstance(content, list):
+                # Skip if content is purely tool_result blocks
+                has_tool_result = any(b.get("type") == "tool_result" for b in content if isinstance(b, dict))
+                if has_tool_result:
+                    continue
+                texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                if texts and any(t.strip() for t in texts):
+                    turns.append((i, (texts[0] or "")[:60]))
+        if not turns:
+            self._system("No rewindable turns in history.")
+            return
+        # Reverse numbering: 1 = most recent turn, 2 = second most recent, etc.
+        # /rewind without args: show list
+        if not args:
+            lines = [f"Rewindable turns ({len(turns)} total, showing last 10):"]
+            show = turns[-10:]
+            for offset, (_, preview) in enumerate(reversed(show), 1):
+                lines.append(f"  {offset}) {preview!r}")
+            lines.append("/rewind <n> to rewind n turns (1 = undo last turn).")
+            self._system("\n".join(lines))
+            return
+        # /rewind <n>: truncate last n turns
+        try:
+            n = int(args[0])
+        except ValueError:
+            self._system("Usage: /rewind <n> (1 = undo last turn)")
+            return
+        if n < 1 or n > len(turns):
+            self._system(f"Invalid: range is 1-{len(turns)}")
+            return
+        # cut_at = index of the n-th turn from the end
+        cut_at = turns[-n][0]
+        removed = len(history) - cut_at
+        history[:] = history[:cut_at]
+        # Sync TUI messages: keep only messages before the corresponding user message
+        real_user_indices = [i for i, msg in enumerate(session.messages) if msg.role == "user"]
+        if n <= len(real_user_indices):
+            cut_msg = real_user_indices[-n]
+            session.messages = session.messages[:cut_msg]
+        # Mark rewind in agentmain's working memory history
+        try: session.agent.history.append(f"[USER]: /rewind {n}")
+        except Exception: pass
+        self._system(f"Rewound {n} turn(s). Removed {removed} history entries.")
+
+    def _cmd_clear(self, args: list[str]) -> None:
+        self.current.messages.clear(); self._refresh_all()
+
+    def _cmd_close(self, args: list[str]) -> None:
+        if len(self.sessions) <= 1:
+            self._system("Cannot close the last session."); return
+        del self.sessions[self.current_id]
+        self.current_id = next(iter(self.sessions))
+        self._refresh_all()
 
     def _cmd_switch(self, args: list[str]) -> None:
         if not args:
@@ -567,14 +616,18 @@ class GenericAgentTUI(App[None]):
             model = session.agent.get_llm_name(model=True)
         except Exception:
             model = "unknown"
-        mode = "demo" if self.demo else "real"
         status.update(
-            f"[b]#{session.agent_id} {session.name}[/b]  status={session.status}  task={session.current_task_id}  model={model}  mode={mode}\n"
+            f"[b]#{session.agent_id} {session.name}[/b]  status={session.status}  task={session.current_task_id}  model={model}\n"
             "Enter message or /help. Per-task queue streaming is enabled (inc_out=True)."
         )
 
     def action_toggle_fold(self) -> None:
         self.fold_mode = not self.fold_mode
+        # Invalidate cached panels for assistant messages since fold state changed
+        if self.current_id is not None:
+            for msg in self.current.messages:
+                if msg.role == "assistant":
+                    msg._rendered_panel = None
         self._refresh_log()
         mode_label = "folded" if self.fold_mode else "expanded"
         self.notify(f"Display mode: {mode_label} (Ctrl+F to toggle)")
@@ -584,26 +637,47 @@ class GenericAgentTUI(App[None]):
         log.clear()
         if self.current_id is None:
             return
+        # Collect recent task_ids to only expand the latest 3 tasks
+        recent_task_ids: set[int] = set()
+        if not self.fold_mode:
+            seen: list[int] = []
+            for msg in reversed(self.current.messages):
+                if msg.role == "assistant" and msg.task_id not in seen:
+                    seen.append(msg.task_id)
+                    if len(seen) == 5:
+                        break
+            recent_task_ids = set(seen)
         for msg in self.current.messages:
             if msg.role == "user":
-                log.write(Panel(Markdown(msg.content), title="You", border_style="blue"))
+                if msg._rendered_panel is None:
+                    msg._rendered_panel = Panel(Markdown(msg.content), title="You", border_style="blue")
+                log.write(msg._rendered_panel)
             elif msg.role == "assistant":
-                suffix = "" if msg.done else "\n▌"
-                content = render_folded_text(msg.content) if self.fold_mode else msg.content
-                log.write(Panel(Markdown(content + suffix), title=f"Agent task {msg.task_id}", border_style="green"))
+                if msg.done and msg._rendered_panel is not None:
+                    log.write(msg._rendered_panel)
+                else:
+                    suffix = "" if msg.done else "\n▌"
+                    # Fold older tasks even in unfold mode to reduce render cost
+                    should_fold = self.fold_mode or (msg.task_id not in recent_task_ids)
+                    content = render_folded_text(msg.content) if should_fold else msg.content
+                    panel = Panel(Markdown(content + suffix), title=f"Agent task {msg.task_id}", border_style="green")
+                    if msg.done:
+                        msg._rendered_panel = panel
+                    log.write(panel)
             else:
-                log.write(Panel(Text(msg.content), title="System", border_style="yellow"))
+                if msg._rendered_panel is None:
+                    msg._rendered_panel = Panel(Text(msg.content), title="System", border_style="yellow")
+                log.write(msg._rendered_panel)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Textual TUI for GenericAgent")
-    parser.add_argument("--demo", action="store_true", help="use a fake streaming agent; no LLM/API keys required")
     return parser
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    app = GenericAgentTUI(demo=args.demo)
+    app = GenericAgentTUI()
     app.run()
     return 0
 

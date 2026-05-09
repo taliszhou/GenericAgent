@@ -479,9 +479,8 @@ def _msgs_claude2oai(messages):
             m = {"role": "assistant"}
             if reasoning: m["reasoning_content"] = reasoning
             if text_parts: m["content"] = text_parts
-            else: m["content"] = ""
+            elif not tool_calls: m["content"] = "."
             if tool_calls: m["tool_calls"] = tool_calls
-            if not text_parts and not tool_calls and reasoning: m["content"] = "."
             result.append(m)
         elif role == "user":
             text_parts = []
@@ -563,7 +562,7 @@ class BaseSession:
                 if block.get('type', '') == 'tool_use':
                     tu = {'name': block.get('name', ''), 'arguments': block.get('input', {})}
                     yield f'<tool_use>{json.dumps(tu, ensure_ascii=False)}</tool_use>'
-            if not content.startswith("!!!Error:"): self.history.append({"role": "assistant", "content": [{"type": "text", "text": content}]})
+            if content.strip() and not content.startswith("!!!Error:"): self.history.append({"role": "assistant", "content": [{"type": "text", "text": content}]})
         return _ask_gen() if self.stream else ''.join(list(_ask_gen()))
 
 def _keep_claude_block(b): return not isinstance(b, dict) or b.get("type") != "thinking" or b.get("signature")
@@ -586,6 +585,7 @@ def _ensure_thinking_blocks(messages, model):
 
 class ClaudeSession(BaseSession):
     def raw_ask(self, messages):
+        messages = _fix_messages(messages)
         if self.max_tokens is None: self.max_tokens = 8192
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": "prompt-caching-2024-07-31"}
         payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens, "stream": self.stream}
@@ -604,7 +604,7 @@ class ClaudeSession(BaseSession):
 
 class LLMSession(BaseSession):
     def raw_ask(self, messages): return (yield from _openai_stream(self, messages))
-    def make_messages(self, raw_list): return _msgs_claude2oai(raw_list)
+    def make_messages(self, raw_list): return _msgs_claude2oai(_fix_messages(raw_list))
 
 def _fix_messages(messages):
     """修复 messages 符合 Claude API：交替、tool_use/tool_result 配对"""
@@ -994,7 +994,11 @@ class NativeToolClient:
         for tid in self._pending_tool_ids:
             if tid not in tr_id_set: tool_result_blocks.append({"type": "tool_result", "tool_use_id": tid, "content": ""})
         self._pending_tool_ids = []
-        merged = {"role": "user", "content": tool_result_blocks + combined_content}
+        # Filter whitespace-only text blocks that cause 400 on strict API proxies
+        filtered_content = [c for c in combined_content if c.get("text", "").strip()]
+        final_content = tool_result_blocks + filtered_content
+        if not final_content: final_content = [{"type": "text", "text": "."}]
+        merged = {"role": "user", "content": final_content}
         _write_llm_log('Prompt', json.dumps(merged, ensure_ascii=False, indent=2), self.log_path)
         gen = self.backend.ask(merged)
         try:
@@ -1004,3 +1008,19 @@ class NativeToolClient:
         if resp: _write_llm_log('Response', resp.raw, self.log_path)
         if resp and hasattr(resp, 'tool_calls') and resp.tool_calls: self._pending_tool_ids = [tc.id for tc in resp.tool_calls]
         return resp
+
+def resolve_session(cfg_name):
+    cfg = reload_mykeys()[0].get(cfg_name)
+    if not cfg: raise ValueError(f"Config '{cfg_name}' not in mykey")
+    if 'native' in cfg_name: return (NativeClaudeSession if 'claude' in cfg_name else NativeOAISession)(cfg=cfg)
+    if 'claude' in cfg_name: return ClaudeSession(cfg=cfg)
+    return LLMSession(cfg=cfg) if 'oai' in cfg_name else None
+
+def resolve_client(cfg_name):
+    s = resolve_session(cfg_name)
+    return (NativeToolClient(s) if isinstance(s, (NativeClaudeSession, NativeOAISession)) else ToolClient(s)) if s else None
+
+def fast_ask(prompt, cfg_name):
+    sess = resolve_session(cfg_name)
+    if not sess: raise ValueError(f"fast_ask: '{cfg_name}' unsupported")
+    return "".join(sess.raw_ask([{"role": "user", "content": prompt}]))
