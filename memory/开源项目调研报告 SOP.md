@@ -30,17 +30,6 @@
 - [ ] CI/CD 配置、测试覆盖率
 - [ ] 文档完整性（API docs/开发指南/示例）
 
-3. **技术架构与源代码分析**：
-   - **源代码结构**：通过 GitHub API 获取仓库目录树（`git/trees`），分析顶层目录结构、模块划分、代码组织方式
-   - **技术栈深度分析**：获取 `package.json`/`Cargo.toml`/`requirements.txt` 等依赖清单，区分运行时依赖 vs 开发依赖；识别构建工具（Vite/Webpack/Turbopack 等）、测试框架、CI/CD 配置
-   - **架构设计评估**：从目录结构推断架构模式（分层/微服务/模块化等）；关注跨平台策略（Electron/Tauri/原生）、数据库选型（SQLite/PostgreSQL/向量数据库）、通信协议（IPC/REST/gRPC/MCP）
-   - **代码规模与质量**：统计主要语言文件数量、代码行数（通过 GitHub API size 或 clone 后 `cloc`）；检查是否有 lint 配置（ESLint/Rustfmt 等）、测试覆盖率配置
-
-4. **决策逻辑还原**：
-   - 分析关键决策背后的深层考量
-   - 还原技术选型的原因
-   - 评估战略方向的合理性
-
 ### 1.4 竞品横向分析
 - [ ] 直接竞品列表（≥3个）
 - [ ] Star 数/社区规模对比
