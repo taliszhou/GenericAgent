@@ -13,6 +13,8 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "bottle>=0.12",
     "simple-websocket-server>=0.4",
+    "pilk>=0.2.4",
+    "sherpa-onnx>=1.13.1",
 ]
 
 [project.optional-dependencies]

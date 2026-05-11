@@ -7,6 +7,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'temp')
 from agentmain import GeneraticAgent
 
+# ── ASR dependencies (optional, graceful degradation) ──
+try:
+    import numpy as _np
+    import sherpa_onnx as _sherpa
+    HAS_ASR_DEPS = True
+except ImportError:
+    HAS_ASR_DEPS = False
+try:
+    import pilk as _pilk
+except ImportError:
+    _pilk = None  # pilk may fail on some platforms, handled in _silk_to_wav
+
 # ── WxBotClient (inline from wx_bot_client.py) ──
 for _k in ('HTTPS_PROXY', 'https_proxy'):
     os.environ.pop(_k, None)  # avoid inherited proxy breaking WeChat long-poll SSL
@@ -258,6 +270,108 @@ def _dl_media(items):
             break  # one media per item
     return paths
 
+# ── ASR: SenseVoice speech-to-text ──
+def _find_sensevoice_model_dir():
+    """Search for SenseVoice model directory in priority order."""
+    search_dirs = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'temp'),
+        os.getcwd(),
+        str(Path.home()),
+    ]
+    dir_names = [
+        'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09',
+        'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17',
+        'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8',
+    ]
+    for base in search_dirs:
+        for dn in dir_names:
+            d = os.path.join(base, dn)
+            if os.path.isdir(d) and os.path.exists(os.path.join(d, 'model.int8.onnx')) and os.path.exists(os.path.join(d, 'tokens.txt')):
+                return d
+    return None
+
+def _get_asr_recognizer():
+    """Return a cached sherpa-onnx OfflineRecognizer, or an error string."""
+    global _asr_recognizer, _asr_error
+    if '_asr_recognizer' in globals():
+        return _asr_recognizer or _asr_error or 'ASR 模型未就绪'
+    _asr_error = None
+    if not HAS_ASR_DEPS:
+        _asr_error = 'sherpa-onnx 未安装'
+        return _asr_error
+    model_dir = _find_sensevoice_model_dir()
+    if not model_dir:
+        _asr_error = 'SenseVoice 模型未下载'
+        return _asr_error
+    try:
+        _asr_recognizer = _sherpa.OfflineRecognizer.from_sense_voice(
+            model=os.path.join(model_dir, 'model.int8.onnx'),
+            tokens=os.path.join(model_dir, 'tokens.txt'),
+            language='zh',
+            use_itn=True,
+            num_threads=4,
+        )
+        return _asr_recognizer
+    except Exception as e:
+        _asr_error = f'ASR 初始化失败: {e}'
+        return _asr_error
+
+def _silk_to_wav(silk_path):
+    """Convert .silk to WAV bytes. Returns (wav_bytes, sample_rate) or (None, err_msg)."""
+    if _pilk is None:
+        return None, 'pilk 未安装'
+    try:
+        pcm_path = silk_path + '.pcm'
+        _pilk.decode(silk_path, pcm_path, pcm_rate=24000)
+        with open(pcm_path, 'rb') as f:
+            pcm = f.read()
+        os.remove(pcm_path)
+        import struct, wave, io
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(pcm)
+        return buf.getvalue(), 24000
+    except Exception as e:
+        return None, f'silk 解码失败: {e}'
+
+def _transcribe_audio_file(file_path):
+    """Transcribe a media file. Supports .silk (auto-convert) and .wav.
+    Returns (text, None) on success or (None, err_msg) on failure."""
+    recognizer = _get_asr_recognizer()
+    if not isinstance(recognizer, _sherpa.OfflineRecognizer if HAS_ASR_DEPS else object):
+        return None, recognizer  # error string
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.silk':
+        wav_bytes, sr = _silk_to_wav(file_path)
+        if wav_bytes is None:
+            return None, sr  # error msg
+        # silk PCM is already 16-bit mono, decode directly from bytes
+        audio = _np.frombuffer(wav_bytes, dtype=_np.int16).astype(_np.float32) / 32768.0
+    elif ext == '.wav':
+        try:
+            import soundfile as sf
+            audio, sr = sf.read(file_path, dtype='float32', always_2d=True)
+            audio = audio[:, 0] if audio.ndim > 1 else audio
+        except (ImportError, Exception):
+            # fallback: use standard library wave module
+            import wave
+            with wave.open(file_path, 'rb') as wf:
+                sr = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+                audio = _np.frombuffer(frames, dtype=_np.int16).astype(_np.float32) / 32768.0
+    else:
+        return None, f'不支持音频格式: {ext}'
+    try:
+        stream = recognizer.create_stream()
+        stream.accept_waveform(sr, audio)
+        recognizer.decode_stream(stream)
+        return stream.result.text.strip(), None
+    except Exception as e:
+        return None, f'ASR 推理失败: {e}'
+
 agent = GeneraticAgent()
 agent.verbose = False
 
@@ -314,7 +428,22 @@ def on_message(bot, msg):
     media_paths = _dl_media(msg.get('item_list', []))
     if not text and not media_paths: return
     if media_paths:
-        text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in media_paths)
+        # ── ASR: transcribe .silk voice messages ──
+        transcript = ''
+        for p in list(media_paths):
+            if p.lower().endswith('.silk'):
+                try:
+                    t, err = _transcribe_audio_file(p)
+                    if t:
+                        transcript += t + '\n'
+                        print(f'[WX] ASR: "{t[:50]}..."', file=sys.__stdout__)
+                    elif err:
+                        print(f'[WX] ASR err: {err}', file=sys.__stdout__)
+                except Exception as e:
+                    print(f'[WX] ASR exception: {e}', file=sys.__stdout__)
+        if transcript.strip():
+            text = (text + '\n' if text else '') + f'[用户语音消息]: {transcript.strip()}'
+        text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in media_paths if not p.lower().endswith('.silk'))
     print(f'[WX] 收到: {text[:80]}', file=sys.__stdout__)
 
     # Commands
