@@ -53,6 +53,82 @@ from agentmain import GeneraticAgent
 JSONRPC_VERSION = "2.0"
 ACP_PROTOCOL_VERSION = 1
 
+# 会话持久化目录
+_SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sessions")
+_SESSIONS_INDEX = os.path.join(_SESSIONS_DIR, "index.json")
+
+
+def _get_session_file(session_id: str) -> str:
+    """根据 session_id 生成唯一的 session 文件路径"""
+    os.makedirs(_SESSIONS_DIR, exist_ok=True)
+    return os.path.join(_SESSIONS_DIR, f"{session_id}.json")
+
+
+def _load_index() -> dict:
+    """加载会话索引: {session_id: {"cwd": str, "created": timestamp, "title": str}}"""
+    try:
+        if os.path.exists(_SESSIONS_INDEX):
+            with open(_SESSIONS_INDEX, encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        eprint(f"[GA] Failed to load index: {e}")
+    return {}
+
+
+def _save_index(index: dict) -> None:
+    """保存会话索引"""
+    try:
+        with open(_SESSIONS_INDEX, 'w', encoding='utf-8') as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        eprint(f"[GA] Failed to save index: {e}")
+
+
+def _save_history(session_id: str, cwd: str, history: List[Dict], title: str = "") -> None:
+    """保存会话历史到文件并更新索引"""
+    try:
+        path = _get_session_file(session_id)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        
+        # 更新索引
+        index = _load_index()
+        index[session_id] = {"cwd": cwd, "title": title}
+        _save_index(index)
+        eprint(f"[GA] History saved: {session_id}")
+    except Exception as e:
+        eprint(f"[GA] Failed to save history: {e}")
+
+
+def _load_history(session_id: str) -> Optional[List[Dict]]:
+    """从文件加载会话历史"""
+    try:
+        path = _get_session_file(session_id)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            eprint(f"[GA] History loaded: {session_id}, {len(history)} messages")
+            return history
+    except Exception as e:
+        eprint(f"[GA] Failed to load history: {e}")
+    return None
+
+
+def _restore_history_to_agent(agent, history: List[Dict]) -> None:
+    """将加载的历史恢复到 agent"""
+    if hasattr(agent, 'history') and history:
+        agent.history.extend(history)
+
+
+def list_sessions(cwd: Optional[str] = None) -> List[dict]:
+    """列出所有保存的会话，可按 cwd 过滤"""
+    index = _load_index()
+    sessions = []
+    for sid, info in index.items():
+        if cwd is None or info.get("cwd") == cwd:
+            sessions.append({"session_id": sid, "cwd": info.get("cwd", ""), "title": info.get("title", "")})
+    return sessions
+
 
 def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr, flush=True)
@@ -197,6 +273,12 @@ class GenericAgentAcpBridge:
         session_id = f"ga_{uuid.uuid4().hex}"
         agent = self.new_agent()
         session = SessionState(session_id=session_id, cwd=cwd, agent=agent)
+        
+        # 恢复历史记录（如果之前有保存）
+        saved_history = _load_history(session_id)
+        if saved_history:
+            _restore_history_to_agent(agent, saved_history)
+        
         self._sessions[session_id] = session
         self.write_message(
             jsonrpc_result(
@@ -256,6 +338,9 @@ class GenericAgentAcpBridge:
                     finished_req_id = session.current_prompt_id
                     session.current_prompt_id = None
                 if finished_req_id is not None:
+                    # 保存历史记录
+                    if hasattr(session.agent, 'history'):
+                        _save_history(session.session_id, session.cwd, session.agent.history)
                     import time
                     time.sleep(0.1)
                     self.write_message(
