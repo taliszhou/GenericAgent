@@ -53,57 +53,40 @@ from agentmain import GeneraticAgent
 JSONRPC_VERSION = "2.0"
 ACP_PROTOCOL_VERSION = 1
 
-# 会话持久化目录
-_SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sessions")
-_SESSIONS_INDEX = os.path.join(_SESSIONS_DIR, "index.json")
+# 会话持久化布局参考 Claude Code:
+# ~/.genericagent/projects/<encoded-cwd>/<session_id>.json
+# encoded-cwd: 把 cwd 中的路径分隔符替换为 '-', 去掉 Windows 盘符冒号
+_SESSIONS_ROOT = os.path.join(os.path.expanduser("~"), ".genericagent", "projects")
 
 
-def _get_session_file(session_id: str) -> str:
-    """根据 session_id 生成唯一的 session 文件路径"""
-    os.makedirs(_SESSIONS_DIR, exist_ok=True)
-    return os.path.join(_SESSIONS_DIR, f"{session_id}.json")
+def _encode_cwd(cwd: str) -> str:
+    normalized = cwd.replace("\\", "/")
+    return normalized.replace("/", "-").replace(":", "")
 
 
-def _load_index() -> dict:
-    """加载会话索引: {session_id: {"cwd": str, "created": timestamp, "title": str}}"""
+def _project_dir(cwd: str) -> str:
+    path = os.path.join(_SESSIONS_ROOT, _encode_cwd(cwd))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _get_session_file(session_id: str, cwd: str) -> str:
+    return os.path.join(_project_dir(cwd), f"{session_id}.json")
+
+
+def _save_history(session_id: str, cwd: str, history: List[Dict]) -> None:
     try:
-        if os.path.exists(_SESSIONS_INDEX):
-            with open(_SESSIONS_INDEX, encoding='utf-8') as f:
-                return json.load(f)
-    except Exception as e:
-        eprint(f"[GA] Failed to load index: {e}")
-    return {}
-
-
-def _save_index(index: dict) -> None:
-    """保存会话索引"""
-    try:
-        with open(_SESSIONS_INDEX, 'w', encoding='utf-8') as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        eprint(f"[GA] Failed to save index: {e}")
-
-
-def _save_history(session_id: str, cwd: str, history: List[Dict], title: str = "") -> None:
-    """保存会话历史到文件并更新索引"""
-    try:
-        path = _get_session_file(session_id)
+        path = _get_session_file(session_id, cwd)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
-        
-        # 更新索引
-        index = _load_index()
-        index[session_id] = {"cwd": cwd, "title": title}
-        _save_index(index)
         eprint(f"[GA] History saved: {session_id}")
     except Exception as e:
         eprint(f"[GA] Failed to save history: {e}")
 
 
-def _load_history(session_id: str) -> Optional[List[Dict]]:
-    """从文件加载会话历史"""
+def _load_history(session_id: str, cwd: str) -> Optional[List[Dict]]:
     try:
-        path = _get_session_file(session_id)
+        path = _get_session_file(session_id, cwd)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 history = json.load(f)
@@ -115,19 +98,8 @@ def _load_history(session_id: str) -> Optional[List[Dict]]:
 
 
 def _restore_history_to_agent(agent, history: List[Dict]) -> None:
-    """将加载的历史恢复到 agent"""
     if hasattr(agent, 'history') and history:
         agent.history.extend(history)
-
-
-def list_sessions(cwd: Optional[str] = None) -> List[dict]:
-    """列出所有保存的会话，可按 cwd 过滤"""
-    index = _load_index()
-    sessions = []
-    for sid, info in index.items():
-        if cwd is None or info.get("cwd") == cwd:
-            sessions.append({"session_id": sid, "cwd": info.get("cwd", ""), "title": info.get("title", "")})
-    return sessions
 
 
 def eprint(*args: Any) -> None:
@@ -245,7 +217,7 @@ class GenericAgentAcpBridge:
         result = {
             "protocolVersion": version,
             "agentCapabilities": {
-                "loadSession": False,
+                "loadSession": True,
                 "mcpCapabilities": {"http": False, "sse": False},
                 "promptCapabilities": {
                     "image": False,
@@ -273,18 +245,46 @@ class GenericAgentAcpBridge:
         session_id = f"ga_{uuid.uuid4().hex}"
         agent = self.new_agent()
         session = SessionState(session_id=session_id, cwd=cwd, agent=agent)
-        
-        # 恢复历史记录（如果之前有保存）
-        saved_history = _load_history(session_id)
-        if saved_history:
-            _restore_history_to_agent(agent, saved_history)
-        
         self._sessions[session_id] = session
         self.write_message(
             jsonrpc_result(
                 req_id,
                 {
                     "sessionId": session_id,
+                    "modes": None,
+                    "configOptions": None,
+                },
+            )
+        )
+
+    def handle_session_load(self, req_id: Any, params: Dict[str, Any]) -> None:
+        session_id = params.get("sessionId")
+        cwd = params.get("cwd")
+        if not isinstance(session_id, str) or not session_id:
+            self.write_message(jsonrpc_error(-32602, "sessionId is required", req_id))
+            return
+        if not isinstance(cwd, str) or not cwd:
+            self.write_message(jsonrpc_error(-32602, "cwd is required", req_id))
+            return
+        if not os.path.isabs(cwd):
+            cwd = os.path.abspath(cwd)
+
+        saved_history = _load_history(session_id, cwd)
+        if saved_history is None:
+            self.write_message(jsonrpc_error(-32602, f"unknown sessionId: {session_id}", req_id))
+            return
+
+        agent = self.new_agent()
+        _restore_history_to_agent(agent, saved_history)
+        session = SessionState(session_id=session_id, cwd=cwd, agent=agent)
+        self._sessions[session_id] = session
+
+        # 历史消息 UI 渲染由 codeg 端的 GenericAgentParser 直接读盘完成,
+        # session/load 阶段通过 session/update 推送的消息会被 codeg 后端丢弃.
+        self.write_message(
+            jsonrpc_result(
+                req_id,
+                {
                     "modes": None,
                     "configOptions": None,
                 },
@@ -416,7 +416,7 @@ class GenericAgentAcpBridge:
             elif method == "session/cancel":
                 self.handle_session_cancel(params)
             elif method == "session/load":
-                self.write_message(jsonrpc_error(-32601, "session/load not supported", req_id))
+                self.handle_session_load(req_id, params)
             elif method == "session/list":
                 self.write_message(jsonrpc_error(-32601, "session/list not supported", req_id))
             elif method == "session/close":

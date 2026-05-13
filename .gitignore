@@ -130,3 +130,4 @@ reflect/*
 **/__pycache__/
 
 .claude/
+frontends/.sessions/
